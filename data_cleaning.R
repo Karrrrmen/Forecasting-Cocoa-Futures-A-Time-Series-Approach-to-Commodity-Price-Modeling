@@ -57,7 +57,12 @@ cocoa_data$Year <- as.numeric(substr(cocoa_data$YearMonth, 1, 4))
 cocoa_data <- cocoa_data %>%
   left_join(production, by = "Year") %>%
   select(-Entity) %>% # Remove 'Entity' since it's always "Ghana"
-  select(YearMonth, Year, price, monthly_avg_temp, monthly_avg_precip, production_in_ton)
+  rename(Price = price) %>%
+  rename(Monthly_Avg_Temp = monthly_avg_temp) %>%
+  rename(Monthly_Avg_Precip = monthly_avg_precip) %>%
+  rename(Production_in_Ton = production_in_ton) %>%
+  select(YearMonth, Year, Price, Monthly_Avg_Temp, Monthly_Avg_Precip, Production_in_Ton)
+cocoa_data$Production_in_Ton[is.na(cocoa_data$Production_in_Ton)] <- 542000.0
 
 
 #### Save data ####
