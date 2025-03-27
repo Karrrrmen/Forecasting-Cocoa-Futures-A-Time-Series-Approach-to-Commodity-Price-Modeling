@@ -1,10 +1,14 @@
 # Introduction
+(Emily)
 
 # Literature Review
+(Emily)
 
 # Methodology
 
+
 # Data
+
 
 ```{r}
 #| include: false
@@ -65,12 +69,14 @@ ggplot(climate_2023, aes(x = as.Date(paste0(YearMonth, "-01")), y = monthly_avg_
 
 
 
-
-
 # Forecasting and Results
+(Karmen)
 
 # Discussion and Conclusion
 
+
 # Appendix
 
+
 # References
+(Emily)
