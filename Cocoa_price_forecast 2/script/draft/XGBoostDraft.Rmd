@@ -1,0 +1,64 @@
+---
+format: pdf
+output: pdf_document
+---
+
+# XGBoost Time Series Forecasting
+
+XGBoost (**eXtreme Gradient Boosting**) forecasting is a machine learning algorithm 
+that renowned for its robustness in handling structured data and capturing complex nonlinear relationships. Given the presence of exogenous variables and the non-stationary nature of cocoa prices, XGBoost is selected for its ability to incorporate multiple feature types without strict assumptions about linearity or stationarity and handle non-stationarity through differencing. 
+XGBoost models the cocoa price difference as a sum of multiple decision trees:
+
+$$
+\hat{y}_t = f_1(x_t) + f_2(x_t) + \dots + f_M(x_t)
+$$
+
+where $\hat{y}_t$ is the predicted **cocoa price difference** at time $t$, 
+$x_t$ represents the **input features** and $f_m(x_t)$ is the 
+**m-th decision tree** trained by XGBoost 
+with $M$ be the total number of boosting iterations.
+
+The initial model will incorporate the following predictor variables (features):
+\begin{itemize}
+    \item $\text{Monthly\_Avg\_Temp}$ (Monthly Average Temperature)
+    \item $\text{Monthly\_Avg\_Precip}$ (Monthly Average Precipitation)
+    \item $\text{Exchange\_Rate}_t$ (Exchange rate)
+    \item $\text{Production\_in\_Ton}_t$ (Cocoa Production in tons)
+    \item $\text{Price\_diff}_{t}$ (Price difference)
+    \item $\text{Price\_diff}_{t-1}$ (Price difference with 1 lag)
+    \item $\text{Price\_diff}_{t-2}$ (Price difference with 2 lag)
+    \item $\text{Price\_diff}_{t-3}$ (Price difference with 3 lag)
+\end{itemize}
+
+The inclusion of 1-month lagged exchange rate follows Frankel and Hardouvelis'
+(1985) observation supports that modeling exchange rate effects with 1-month delay 
+account for market absorption time for currency fluctuations and reducing noise compared 
+to immediate-rate models. Furthermore, three lagged price differences is grounded 
+in both empirical evidence and commodity market dynamics, particular in agricultural commodities like cocoa, where short-term price momentum and cyclical patterns are exhibited frequently due to supply chain delays coming from production adjustments and inventory restocking typically manifest over quarterly horizons (Gilbert, 2010).
+
+
+![Feature Importance of Three Models: As XGBoost ranks feature by its importance and highlights which variables drive price fluctuations, focusing on substantial predictive importance features by dropping variables with importance below 0.1, the final XGBoost model is determines by the features Exchange rate, Price difference with 1 lag, Price difference with 2 lag](~/STA457-Assignments/Cocoa_price_forecast/script/XGBoost_Draft/XGBoost-features.png){#fig:feature}
+
+![The discrepancies between the actual and predicted prices over the test period from January 1, 2010, to November 1, 2024 with the price differences fluctuate with notable deviations indicates the model significantly overestimated the actual prices. The trend over time shows variability with no clear consistent pattern, suggesting that the model's performance may be influenced by external factors or inherent limitations in capturing the underlying price dynamics.](~/STA457-Assignments/Cocoa_price_forecast/script/XGBoost_Draft/XGBoost_ActualVSDiff.png){#fig:actual-vs-predict}
+```{r model metrics, echo=FALSE, message=FALSE, results='asis'}
+model3_metrics <- data.frame(
+  Metric = c("MAE", "RMSE", "MAPE(%)"),
+  Value = c(38.110, 235.460, 41.142
+)
+)
+knitr::kable(model3_metrics, caption = "Model 3 Metrics")
+```
+
+The MAE of 38.11 indicates that model’s predicted cocoa prices deviate from the actual values by about 38 units. The RMSE of 235.46 reflects the presence of larger individual errors, as this metric gives more weight to significant deviations—likely arising during periods of extreme price movements. The MAPE of 41.14% reveals that the model's relative forecasting accuracy is relatively weak, especially during periods where actual prices are lower, amplifying the percentage-based error. These results suggest that while Model 3 captures general trends, it struggles to consistently predict prices during high-volatility periods such as 2023 to 2024. The model’s limited accuracy highlights the need for further enhancements, potentially through feature engineering, hybrid models, or the integration of additional exogenous variables.
+
+![Since XGBoost predicts price differences $\hat{y}_t$, the actual cocoa price is 
+calculated recursively by $\text{Price}_t = \text{Price}_{t-1} + \hat{y}_t$,
+where price at time $t$ is derived by adding the predicted difference to the previous price. According to model 3, the forecasted monthly cocoa price during the period from December 2024 to May 2025 is increasing linearly approximately from $\$8000$ to $\$9800$](~/STA457-Assignments/Cocoa_price_forecast/script/XGBoost_Draft/XGBoost_6MonthForecasting.png){#fig:forecast}
+
+
+### **Final Cocoa Price Calculation**
+Since XGBoost predicts price differences $\hat{y}_t$, the actual cocoa price is 
+calculated recursively by $\text{Price}_t = \text{Price}_{t-1} + \hat{y}_t$,
+where price at time $t$ is derived by adding the predicted difference to the previous price. According to model 3, the forecasted monthly cocoa price during the period from December 2024 to May 2025 is increasing linearly approximately from $\$8000$ to $\$9800$. 
+
+

@@ -1,0 +1,501 @@
+# ARIMA, ARIMAX, GARCH
+```{r Setup and Initialization}
+# List of required packages
+required_packages <- c("dplyr", "readr", "lubridate", "zoo", 
+                       "forecast", "tidyr", "FinTS", "rugarch", "here")
+
+# Check if packages are installed, and install them if not
+for (package in required_packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# Load the libraries
+library(dplyr)
+library(readr)
+library(lubridate)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(zoo)
+library(tidyr)
+library(FinTS)
+library(rugarch)
+```
+```{r Data Processing Functions, include=FALSE}
+process_cocoa_data <- function(file_path) {
+  # Load and process daily cocoa data
+  cocoa_daily <- read_csv(file_path) %>%
+    rename(Price_Raw = 'ICCO daily price (US$/tonne)') %>% 
+    mutate(Date = dmy(Date)) %>% 
+    filter(!is.na(Date)) %>% 
+    arrange(Date)
+  
+  # Validate data
+  if(nrow(cocoa_daily) == 0 || all(is.na(cocoa_daily$Date))) {
+    stop("Cocoa data is empty or Date column could not be parsed correctly.")
+  }
+  
+  # Create complete date sequence and clean prices
+  min_date <- min(cocoa_daily$Date)
+  max_date <- max(cocoa_daily$Date)
+  
+  cocoa_daily_complete <- cocoa_daily %>%
+    complete(Date = seq.Date(min_date, max_date, by = "day")) %>%
+    mutate(
+      Price_Cleaned = gsub("[^0-9.]", "", Price_Raw),
+      Price_Numeric = as.numeric(Price_Cleaned),
+      Price_Filled_Daily = na.locf(Price_Numeric, na.rm = FALSE),
+      Price_Filled_Daily = na.locf(Price_Filled_Daily, fromLast = TRUE, na.rm = FALSE)
+    ) %>%
+    dplyr::select(Date, Price_Filled_Daily)
+  
+  # Aggregate to weekly
+  cocoa_weekly <- cocoa_daily_complete %>%
+    mutate(Week_Ending_Date = ceiling_date(Date, "week", week_start = 1)) %>% 
+    group_by(Week_Ending_Date) %>%
+    summarise(Price_Weekly_Last = last(Price_Filled_Daily), .groups = 'drop') %>%
+    rename(Date = Week_Ending_Date)
+  
+  # Validate and complete weekly data
+  if(nrow(cocoa_weekly) == 0) stop("Weekly cocoa data frame is empty after aggregation.")
+  
+  cocoa_weekly_complete <- cocoa_weekly %>%
+    complete(Date = seq.Date(min(cocoa_weekly$Date), max(cocoa_weekly$Date), by = "week")) %>%
+    mutate(Price_Weekly_Last = na.locf(Price_Weekly_Last, na.rm = FALSE)) %>%
+    mutate(Price_Weekly_Last = na.locf(Price_Weekly_Last, fromLast = TRUE, na.rm = FALSE))
+  
+  return(cocoa_weekly_complete)
+}
+
+process_weather_data <- function(file_path) {
+  # Load and process weather data
+  ghana_weather_daily <- read_csv(file_path, na = c("", "NA")) %>%
+    mutate(DATE = as_date(DATE)) %>%
+    rename(Date = DATE) %>%
+    filter(!is.na(Date)) %>%
+    mutate(PRCP = ifelse(is.na(PRCP), 0, PRCP)) %>%
+    arrange(Date)
+  
+  # Validate data
+  if(nrow(ghana_weather_daily) == 0) {
+    stop("Ghana weather data is empty or could not be parsed.")
+  }
+  
+  # Aggregate daily across stations
+  ghana_weather_daily_avg <- ghana_weather_daily %>%
+    group_by(Date) %>%
+    summarise(
+      PRCP_avg_daily = mean(PRCP, na.rm = TRUE),
+      TAVG_avg_daily = mean(TAVG, na.rm = TRUE),
+      TMAX_avg_daily = mean(TMAX, na.rm = TRUE),
+      TMIN_avg_daily = mean(TMIN, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Complete daily sequence
+  min_date <- min(ghana_weather_daily_avg$Date)
+  max_date <- max(ghana_weather_daily_avg$Date)
+  
+  ghana_weather_daily_complete <- ghana_weather_daily_avg %>%
+    complete(Date = seq.Date(min_date, max_date, by = "day")) %>%
+    mutate(across(c(PRCP_avg_daily, TAVG_avg_daily, TMAX_avg_daily, TMIN_avg_daily),
+                  ~na.locf(., na.rm = FALSE))) %>%
+    mutate(across(c(PRCP_avg_daily, TAVG_avg_daily, TMAX_avg_daily, TMIN_avg_daily),
+                  ~na.locf(., fromLast = TRUE, na.rm = FALSE)))
+  
+  # Aggregate to weekly
+  ghana_weather_weekly <- ghana_weather_daily_complete %>%
+    mutate(Week_Ending_Date = ceiling_date(Date, "week", week_start = 1)) %>%
+    group_by(Week_Ending_Date) %>%
+    summarise(
+      PRCP_Weekly_Sum = sum(PRCP_avg_daily, na.rm = TRUE),
+      TAVG_Weekly_Avg = mean(TAVG_avg_daily, na.rm = TRUE),
+      TMAX_Weekly_Avg = mean(TMAX_avg_daily, na.rm = TRUE),
+      TMIN_Weekly_Avg = mean(TMIN_avg_daily, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    rename(Date = Week_Ending_Date)
+  
+  # Validate and complete weekly data
+  if(nrow(ghana_weather_weekly) == 0) {
+    stop("Weekly weather data frame is empty after aggregation.")
+  }
+  
+  ghana_weather_weekly_complete <- ghana_weather_weekly %>%
+    complete(Date = seq.Date(min(ghana_weather_weekly$Date), max(ghana_weather_weekly$Date), by = "week")) %>%
+    mutate(across(c(PRCP_Weekly_Sum, TAVG_Weekly_Avg, TMAX_Weekly_Avg, TMIN_Weekly_Avg),
+                  ~na.locf(., na.rm = FALSE))) %>%
+    mutate(across(c(PRCP_Weekly_Sum, TAVG_Weekly_Avg, TMAX_Weekly_Avg, TMIN_Weekly_Avg),
+                  ~na.locf(., fromLast = TRUE, na.rm = FALSE)))
+  
+  return(ghana_weather_weekly_complete)
+}
+
+```
+```{r Data Processing, include=FALSE}
+# Process data
+cocoa_weekly <- process_cocoa_data(here("Daily Prices_ICCO.csv"))
+weather_weekly <- process_weather_data(here("Ghana_data.csv"))
+
+# Combine and trim data
+combined_data <- left_join(cocoa_weekly, weather_weekly, by = "Date") %>%
+  filter(
+    !is.na(Price_Weekly_Last) &
+    !is.na(PRCP_Weekly_Sum) &
+    !is.na(TAVG_Weekly_Avg) &
+    !is.na(TMAX_Weekly_Avg) &
+    !is.na(TMIN_Weekly_Avg)
+  )
+
+if(nrow(combined_data) == 0) {
+  stop("No overlapping data remains after joining and trimming weekly data.")
+}
+
+# Create analysis dataframe with transformations
+analysis_df <- combined_data %>%
+  mutate(
+    log_Price_Weekly = log(Price_Weekly_Last),
+    d_log_Price_Weekly = c(NA, diff(log_Price_Weekly)),
+    d_PRCP_Weekly_Sum = c(NA, diff(PRCP_Weekly_Sum)),
+    d_TMAX_Weekly_Avg = c(NA, diff(TMAX_Weekly_Avg))
+  ) %>%
+  arrange(Date) %>%
+  drop_na()
+```
+```{r Stationarity Analysis}
+# Plot and test log-transformed price
+ggplot(analysis_df, aes(x = Date, y = log_Price_Weekly)) +
+  geom_line() +
+  labs(title = "Log-Transformed Weekly Cocoa Price", y = "Log Price") +
+  theme_minimal()
+
+cat("Stationarity tests for log price:\n")
+print(adf.test(na.omit(analysis_df$log_Price_Weekly)))
+print(kpss.test(na.omit(analysis_df$log_Price_Weekly)))
+
+# Plot and test differenced log price
+ggplot(analysis_df, aes(x = Date, y = d_log_Price_Weekly)) +
+  geom_line() +
+  labs(title = "Differenced Log-Transformed Weekly Cocoa Price", y = "Difference") +
+  theme_minimal()
+
+cat("\nStationarity tests for differenced log price:\n")
+print(adf.test(na.omit(analysis_df$d_log_Price_Weekly)))
+print(kpss.test(na.omit(analysis_df$d_log_Price_Weekly)))
+
+# Check ACF/PACF for differenced log price (for ARIMA/ARMA order selection)
+acf(na.omit(analysis_df$d_log_Price_Weekly), main = "ACF of Differenced Log Price") 
+pacf(na.omit(analysis_df$d_log_Price_Weekly), main = "PACF of Differenced Log Price")
+
+# Climate variable stationarity tests
+climate_vars <- c("PRCP_Weekly_Sum", "TAVG_Weekly_Avg", "TMAX_Weekly_Avg", "TMIN_Weekly_Avg")
+for (var in climate_vars) {
+  cat("\nStationarity tests for", var, ":\n")
+  print(adf.test(na.omit(analysis_df[[var]])))
+  print(kpss.test(na.omit(analysis_df[[var]])))
+}
+```
+```{r ARIMAX Modeling }
+# Prepare data for modeling
+y <- log(analysis_df$Price_Weekly_Last)
+
+# Model 1: All climate variables
+xreg1 <- analysis_df[, c("d_PRCP_Weekly_Sum", "TAVG_Weekly_Avg", "d_TMAX_Weekly_Avg", "TMIN_Weekly_Avg")]
+models1 <- list(
+  fit111 = Arima(y, order = c(1, 1, 1), xreg = as.matrix(xreg1)),
+  fit211 = Arima(y, order = c(2, 1, 1), xreg = as.matrix(xreg1)),
+  fit112 = Arima(y, order = c(1, 1, 2), xreg = as.matrix(xreg1)),
+  fit212 = Arima(y, order = c(2, 1, 2), xreg = as.matrix(xreg1))
+)
+
+# Model comparison
+model_compare1 <- data.frame(
+  Model = names(models1),
+  AIC = sapply(models1, AIC),
+  BIC = sapply(models1, BIC)
+) %>% arrange(AIC)
+
+cat("\nModel comparison with all climate variables:\n")
+print(model_compare1)
+
+# Model 2: Selected climate variables
+xreg2 <- analysis_df[, c("d_PRCP_Weekly_Sum", "TAVG_Weekly_Avg")]
+models2 <- list(
+  fit111_2 = Arima(y, order = c(1, 1, 1), xreg = as.matrix(xreg2)),
+  fit211_2 = Arima(y, order = c(2, 1, 1), xreg = as.matrix(xreg2)),
+  fit112_2 = Arima(y, order = c(1, 1, 2), xreg = as.matrix(xreg2)),
+  fit212_2 = Arima(y, order = c(2, 1, 2), xreg = as.matrix(xreg2))
+)
+
+model_compare2 <- data.frame(
+  Model = names(models2),
+  AIC = sapply(models2, AIC),
+  BIC = sapply(models2, BIC)
+) %>% arrange(AIC)
+
+cat("\nModel comparison with selected climate variables:\n")
+print(model_compare2)
+```
+```{r Final ARIMAX Model Analysis}
+# Select best model (fit212_2)
+final_model <- models2$fit212_2
+
+cat("\nFinal model summary:\n")
+summary(final_model)
+
+cat("\nResidual diagnostics:\n")
+checkresiduals(final_model)
+
+analysis_df <- analysis_df %>% drop_na()
+```
+```{r Train 90/10}
+# Train/Test Split (90/10)
+train_ratio <- 0.9
+n <- nrow(analysis_df)
+train_end <- floor(train_ratio * n)
+train <- analysis_df[1:train_end, ]
+test <- analysis_df[(train_end+1):n, ]
+xreg_test <- as.matrix(test[,c("d_PRCP_Weekly_Sum","TAVG_Weekly_Avg")])
+```
+```{r ARIMAX(2,1,2)-GARCH(1,1) Forecasting}
+# Fit ARIMAX(2,1,2) on Training Data
+arimax_fit <- Arima(train$log_Price_Weekly, 
+                   order = c(2,1,2),
+                   xreg = as.matrix(train[,c("d_PRCP_Weekly_Sum","TAVG_Weekly_Avg")]))
+
+# Forecast using ARIMAX model
+arimax_forecast <- forecast(arimax_fit, xreg = xreg_test)
+```
+```{r ARIMA(0,1,1) Modeling Diagnostics}
+
+# Fit ARIMA(0,1,1) 
+arima011 <- Arima(analysis_df$log_Price_Weekly, order = c(0, 1, 1))
+
+# Model Summary
+cat("\n=== ARIMA(0,1,1) Results ===\n")
+summary(arima011)
+
+# Residual Diagnostics
+cat("\n=== Residual Tests ===\n")
+checkresiduals(arima011)  # Ljung-Box, ACF/PACF plots
+```
+```{r ARIMA(0,1,2) Modeling Diagnostics}
+# Fit ARIMA(0,1,2) 
+arima012 <- Arima(analysis_df$log_Price_Weekly, 
+                    order = c(0, 1, 2))  # Two MA terms
+# Model Summary
+cat("\n=== ARIMA(0,1,2) Results ===\n")
+summary(arima012)
+
+# Residual Diagnostics
+cat("\n=== Residual Tests ===\n")
+checkresiduals(arima012)  # Ljung-Box, ACF/PACF plots
+
+# Forecast (next 52 weeks)
+forecast_values <- forecast(arima012, h = 52)
+
+# Convert to Price Space
+forecast_df <- data.frame(
+  Date = seq(max(analysis_df$Date) + weeks(1), by = "week", length.out = 52),
+  Forecast = exp(forecast_values$mean),
+  Lower_80 = exp(forecast_values$lower[, "80%"]),
+  Upper_80 = exp(forecast_values$upper[, "80%"]),
+  Lower_95 = exp(forecast_values$lower[, "95%"]),
+  Upper_95 = exp(forecast_values$upper[, "95%"])
+)
+
+# Plot Forecast vs History
+ggplot() +
+  geom_line(data = analysis_df, aes(x = Date, y = Price_Weekly_Last), 
+            color = "black", linewidth = 0.8) +
+  geom_line(data = forecast_df, aes(x = Date, y = Forecast), 
+            color = "red", linetype = "dashed", linewidth = 1) +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = Lower_80, ymax = Upper_80),
+              fill = "blue", alpha = 0.2) +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = Lower_95, ymax = Upper_95),
+              fill = "blue", alpha = 0.1) +
+  labs(title = "Cocoa Price Forecast: ARIMA(0,1,2)",
+       subtitle = paste("MA(1) =", round(arima012$coef["ma1"], 4),
+                       "MA(2) =", round(arima012$coef["ma2"], 4)),
+       y = "Price (USD/tonne)", x = "") +
+  theme_minimal() +
+  scale_x_date(limits = c(max(analysis_df$Date) - years(2), max(forecast_df$Date)))
+```
+```{r GARCH}
+# Calculate log returns of weekly cocoa prices
+log_returns <- diff(log(analysis_df$Price_Weekly_Last))
+
+# Check stationarity of log returns (GARCH assumes stationarity)
+cat("ADF Test on log returns:\n")
+print(adf.test(na.omit(log_returns)))
+cat("KPSS Test on log returns:\n")
+print(kpss.test(na.omit(log_returns)))
+
+# Fit a GARCH(1,1) model with constant mean
+garch_spec_11 <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+  mean.model = list(armaOrder = c(0,0), include.mean = TRUE),
+  distribution.model = "std"  # Student-t distribution for fat tails
+)
+
+garch_fit_11 <- ugarchfit(spec = garch_spec_11, data = na.omit(log_returns))
+cat("\n=== GARCH(1,1) Fit Summary ===\n")
+show(garch_fit_11)
+
+# Forecast conditional volatility
+garch_forecast_11 <- ugarchforecast(garch_fit_11, n.ahead = 52)
+garch_vol_11 <- sigma(garch_forecast_11)
+
+# Plot estimated conditional volatility over training data
+vol_df <- data.frame(
+  Date = analysis_df$Date[-1],  # log_returns drops first row
+  Volatility = sigma(garch_fit_11)
+)
+
+ggplot(vol_df, aes(x = Date, y = Volatility)) +
+  geom_line(color = "firebrick") +
+  labs(title = "GARCH(1,1) Estimated Conditional Volatility",
+       y = "Volatility (sigma)", x = "Date") +
+  theme_minimal()
+
+# Overlay log returns and volatility
+returns_df <- data.frame(
+  Date = analysis_df$Date[-1],
+  LogReturn = log_returns,
+  Volatility = sigma(garch_fit_11)
+)
+
+ggplot(returns_df) +
+  geom_line(aes(x = Date, y = LogReturn), color = "black") +
+  geom_line(aes(x = Date, y = Volatility), color = "darkred", linetype = "dashed") +
+  labs(title = "Log Returns and GARCH(1,1) Volatility",
+       y = "Return / Volatility", x = "Date") +
+  theme_minimal()
+
+# Ljung-Box and Normality test of standardized residuals
+garch_resid <- residuals(garch_fit_11, standardize = TRUE)
+cat("\nLjung-Box Test on standardized residuals:\n")
+print(Box.test(garch_resid, type = "Ljung-Box"))
+cat("\nJarque-Bera Test on standardized residuals:\n")
+print(jarque.bera.test(garch_resid))
+```
+```{r Accuracy Metric}
+# Initialize model_results list for forecasts
+
+model_results <- list()
+model_results[["ARIMAX(2,1,2)"]] <- models2$fit212_2
+model_results[["ARIMAX(1,1,1)"]] <- models2$fit111_2
+model_results[["ARIMA(0,1,1)"]] <- arima011
+model_results[["ARIMA(0,1,2)"]] <- arima012
+
+
+# Forecast ARIMA(0,1,1)
+forecast_arima_011 <- forecast(arima011, h = nrow(test))
+model_results[["ARIMA(0,1,1)"]] <- list(
+  actual = test$Price_Weekly_Last,
+  predicted = exp(forecast_arima_011$mean)
+)
+
+# Forecast ARIMA(0,1,2)
+forecast_arima_012 <- forecast(arima012, h = nrow(test))
+model_results[["ARIMA(0,1,2)"]] <- list(
+  actual = test$Price_Weekly_Last,
+  predicted = exp(forecast_arima_012$mean)
+)
+
+# Forecast ARIMAX(1,1,1)
+forecast_arimax_111 <- forecast(models2$fit111_2, xreg = as.matrix(test[, c("d_PRCP_Weekly_Sum", "TAVG_Weekly_Avg")]), h = nrow(test))
+model_results[["ARIMAX(1,1,1)"]] <- list(
+  actual = test$Price_Weekly_Last,
+  predicted = exp(forecast_arimax_111$mean)
+)
+
+# Forecast ARIMAX(2,1,2)
+forecast_arimax_212 <- forecast(models2$fit212_2, xreg = as.matrix(test[, c("d_PRCP_Weekly_Sum", "TAVG_Weekly_Avg")]), h = nrow(test))
+model_results[["ARIMAX(2,1,2)"]] <- list(
+  actual = test$Price_Weekly_Last,
+  predicted = exp(forecast_arimax_212$mean)
+)
+
+# Accuracy Table
+metric_df <- data.frame(Model = character(), MAE = numeric(), RMSE = numeric(), MAPE = numeric())
+
+for (model_name in names(model_results)) {
+  actual <- model_results[[model_name]]$actual
+  predicted <- model_results[[model_name]]$predicted
+
+  mae <- mean(abs(actual - predicted))
+  rmse <- sqrt(mean((actual - predicted)^2))
+  mape <- mean(abs((actual - predicted)/actual)) * 100
+  r_squared <- 1-(sum((actual - predicted)^2)/sum((actual-mean(actual))^2))
+
+  metric_df <- rbind(metric_df, data.frame(
+    Model = model_name,
+    MAE = round(mae, 3),
+    RMSE = round(rmse, 3),
+    MAPE = round(mape, 2),
+    R_Squared = round(r_squared,2)
+  ))
+}
+
+# Display accuracy metrics
+print(metric_df)
+
+```
+```{r}
+# Prepare data in long format
+returns_long <- returns_df %>%
+  pivot_longer(cols = c(LogReturn, Volatility), names_to = "Series", values_to = "Value")
+
+# Create plot with legend
+ggplot(returns_long, aes(x = Date, y = Value, color = Series, linetype = Series)) +
+  geom_line(size = 1) +
+  scale_color_manual(
+    values = c("LogReturn" = "#377eb8", "Volatility" = "#e41a1c"),
+    labels = c("Log Return", "GARCH(1,1) Volatility")
+  ) +
+  scale_linetype_manual(
+    values = c("LogReturn" = "solid", "Volatility" = "dashed"),
+    labels = c("Log Return", "GARCH(1,1) Volatility")
+  ) +
+  labs(
+    title = "Weekly Cocoa Log Returns and GARCH(1,1) Volatility",
+    x = "Date", y = "Log Return / Volatility (sigma)",
+    color = "Series", linetype = "Series"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+```{r}
+# Extract relevant variables
+summary_df <- analysis_df %>%
+  select(
+    `Cocoa Price (USD/tonne)` = Price_Weekly_Last,
+    `Total Weekly Precipitation (mm)` = PRCP_Weekly_Sum,
+    `Average Weekly Temperature (°C)` = TAVG_Weekly_Avg,
+    `Max Weekly Temperature (°C)` = TMAX_Weekly_Avg,
+    `Min Weekly Temperature (°C)` = TMIN_Weekly_Avg
+  )
+
+# Compute summary statistics
+summary_stats <- summary_df %>%
+  summary() %>%
+  as.data.frame.matrix() %>%
+  tibble::rownames_to_column("Statistic")
+
+# Transpose and clean up for presentation
+summary_stats_tidy <- summary_df %>%
+  summarise_all(~c(min(.), quantile(., 0.25), median(.), mean(.), quantile(., 0.75), max(.))) %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames(c("Min", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max")) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display nicely
+knitr::kable(summary_stats_tidy, caption = "Summary Statistics for Weekly Cocoa Price and Climate Variables")
+
+```

@@ -1,0 +1,508 @@
+---
+format: pdf
+---
+
+# Appendix
+
+```{r, eval=FALSE}
+library(forecast)
+library(tseries)
+library(vars)
+library(ggplot2)
+library(gridExtra)
+library(tidyverse)
+library(stats)
+library(lubridate)
+library(fGarch)
+library(rugarch)
+library(knitr)
+library(MTS)
+library(FinTS)
+library(xgboost) 
+cocoa_data <-read_csv(here::here("data/cleaned_data/cocoa_data.csv"))
+price <- read_csv(here::here("data/cleaned_data/price_data.csv"))
+climate <- read_csv(here::here("data/cleaned_data/climate_data.csv"))
+cocoa <-read_csv(here::here("data/cleaned_data/cocoa_data.csv"))
+# Convert 'YearMonth' to a proper Date format
+cocoa_data$YearMonth <- as.Date(paste0(cocoa_data$YearMonth, "-01"))
+# Create a 1-period, 2-period lag of the 'Price' column
+cocoa_data$Price_Lag1 <- c(NA, head(cocoa_data$Price, -1))
+cocoa_data$Price_Lag2 <- c(NA, NA, head(cocoa_data$Price, -2))
+# Remove rows with NA values
+cocoa_data <- na.omit(cocoa_data)
+# Subset the data to include only relevant variables for VAR modeling
+var_data <- cocoa_data[, c("Price", "Price_Lag1", "Price_Lag2")]
+# Calculate the first difference of the 'Price' column to make the series stationary
+var_data$Price_Diff <- c(NA, diff(var_data$Price))
+# Perform Augmented Dickey-Fuller test on differenced 'Price' to check for stationarity
+adf.test(na.omit(var_data$Price_Diff), k = 7)
+var_data <- na.omit(var_data)
+VARselect(var_data$Price_Diff, lag.max = 7, type = "const")
+# Remove rows with NA values from selected columns and create a clean dataset for analysis
+var_data_clean <- na.omit(cocoa_data[, c("Price", "Price_Lag1", "Price_Lag2", "Monthly_Avg_Temp", "Monthly_Avg_Precip", "Exchange_Rate")])
+# Perform Augmented Dickey-Fuller (ADF) tests on original (non-differenced) variables 
+# to test for stationarity (null hypothesis: series has a unit root, i.e., non-stationary)
+adf.test(var_data_clean$Price)
+adf.test(var_data_clean$Price_Lag1)
+adf.test(var_data_clean$Price_Lag2)
+adf.test(var_data_clean$Monthly_Avg_Temp)
+adf.test(var_data_clean$Monthly_Avg_Precip)
+adf.test(var_data_clean$Exchange_Rate)
+# Apply first-order differencing to selected variables to induce stationarity
+# and prepend NA to keep alignment
+var_data_clean$Price_Diff <- c(NA, diff(var_data_clean$Price, differences = 1))
+var_data_clean$Price_Lag1_Diff <- c(NA, diff(var_data_clean$Price_Lag1, differences = 1))
+var_data_clean$Price_Lag2_Diff <- c(NA, diff(var_data_clean$Price_Lag2, differences = 1))
+var_data_clean$ExRate_Diff <- c(NA, diff(var_data_clean$Exchange_Rate, differences = 1))
+# Remove rows with NA values (i.e., the first row for each differenced column)
+var_data_clean <- na.omit(var_data_clean[, c("Price_Diff", "Price_Lag1_Diff", 
+                                             "Price_Lag2_Diff", "Monthly_Avg_Temp", 
+                                             "Monthly_Avg_Precip", "ExRate_Diff")])
+# Perform ADF tests on the differenced variables to confirm stationarity
+adf.test(var_data_clean$Price_Diff)
+adf.test(var_data_clean$Price_Lag1_Diff)
+adf.test(var_data_clean$Price_Lag2_Diff)
+adf.test(var_data_clean$ExRate_Diff)
+var_model <- VAR(var_data_clean[, c("Price_Diff", "Price_Lag1_Diff", "Price_Lag2_Diff", 
+                                    "ExRate_Diff", "Monthly_Avg_Temp", 
+                                    "Monthly_Avg_Precip")], p = 1)
+lag_select <- VARselect(var_data_clean[, c("Price_Diff", "Price_Lag1_Diff", 
+                                           "Price_Lag2_Diff", "ExRate_Diff", 
+                                           "Monthly_Avg_Temp", "Monthly_Avg_Precip")], 
+                        lag.max = 10)
+lag_table <- data.frame(
+  names(lag_select$selection),
+  as.numeric(lag_select$selection)
+)
+kable(lag_table, col.names = NULL, caption = "Lag Order Selection")
+# Fit a VARMA model with lag order (p=1, q=2) using differenced price, exchange rate, 
+# and temperature data
+varma_model <- VARMA(
+  var_data_clean[, c("Price_Diff", "ExRate_Diff", "Monthly_Avg_Temp")], 
+  p = 1, q = 2)
+# Fit a VARMA model with a higher autoregressive lag (p=2, q=2) on the same variables
+varma_model_lag2 <- VARMA(
+  var_data_clean[, c("Price_Diff", "ExRate_Diff", "Monthly_Avg_Temp")], 
+  p = 2, q = 2)
+# Fit a VARMA model with an even higher autoregressive lag (p=4, q=2)
+varma_model_lag4 <- VARMA(
+  var_data_clean[, c("Price_Diff", "ExRate_Diff", "Monthly_Avg_Temp")], 
+  p = 4, q = 2)
+# Extract AIC and BIC values
+compute_AIC <- function(model) {
+  # Number of estimated parameters
+  k <- length(unlist(model$coef))  # Total estimated parameters
+  # Residual sum of squares (approximation for log-likelihood)
+  sigma2 <- sum(model$residuals^2, na.rm = TRUE) / length(model$residuals)
+  # Approximate log-likelihood
+  logL <- -0.5 * length(model$residuals) * log(sigma2)
+  # Compute AIC
+  AIC_value <- 2 * k - 2 * logL
+  return(AIC_value)}
+aics <- c(compute_AIC(varma_model), compute_AIC(varma_model_lag2), 
+          compute_AIC(varma_model_lag4))
+aic_results <- data.frame(Model = c("VARMA(p=1, q=2)", "VARMA(p=2, q=2)", 
+                                    "VARMA(p=4, q=2)"),
+                          AIC = aics)
+kable(aic_results, caption = "AIC for Different Lag Orders")
+varma_model <- VARMA(
+  var_data_clean[, c("Price_Diff", "ExRate_Diff", "Monthly_Avg_Temp")], 
+  p = 1, q = 2) # for AR and MA respectively
+summary(varma_model)
+```
+
+```{r, eval=FALSE}
+#| label: fig-model-check
+#| fig-cap: "The residuals in the VARMA(1, 2) model shows that most of the bars, which represent autocorrelation at different lags, fall within the blue confidence interval bands, typically the default for ACF plots. This indicates that the residuals do not exhibit significant autocorrelation and are random. Therefore, the residuals can be considered white noise, suggesting that the model has effectively captured the underlying patterns. Based on this, we will forecast the price fluctuations over time using VARMA(1, 2) model."
+#| warning: false
+#| message: false
+
+acf(residuals(varma_model))
+```
+
+```{r, eval=FALSE}
+#| warning: false
+#| message: false
+
+# Prepare the data for VAR model (ensure it's a time series object)
+ts_data <- ts(var_data_clean, frequency = 12)
+# Fit the VAR model with lag 1
+var_model_lag1 <- VAR(ts_data, p = 1)
+# Forecast the next 12 periods (or whatever horizon you want)
+#var_forecast <- forecast(var_model_lag1, h = 12)
+#plot(var_forecast)
+varma_forecast <- VARMApred(varma_model, h = 3)
+#forecast_lower <- varma_forecast$pred - 1.96 * varma_forecast$se.err
+#forecast_upper <- varma_forecast$pred + 1.96 * varma_forecast$se.err
+# Time points for the forecast
+forecast_time <- seq(from = length(var_data_clean$Price_Diff) + 1, by = 1, length.out = length(varma_forecast$pred))
+```
+
+```{r, eval=FALSE}
+#| label: fig-varma-forecast
+#| fig-cap: "The forecast for price changes indicates significant short-term volatility, with an initial sharp increase followed by fluctuations before stabilizing around a moderate positive value. The first two steps show a large jump (+88.74 to +241.41), followed by a drop (-20.06), and then a gradual stabilization around 20–30. This suggests that prices may experience a sharp initial surge before settling into a more predictable upward trend. If applied to actual prices, this pattern implies a high-risk, high-reward scenario in the short term, followed by steady growth. For trading or investment decisions, this means navigating an initial period of uncertainty before benefiting from more stable price movements."
+#| echo: false
+#| warning: false
+#| message: false
+
+plot(forecast_time, varma_forecast$pred, type = "o", col = "blue",
+     xlab = "Months Ahead", ylab = "Price Fluctuation",
+     main = "VARMA Forecast of Price Fluctuation for the Next 5 Months")
+```
+
+```{r, eval=FALSE}
+# Generate forecasts and predicted values
+varma_forecast <- VARMApred(varma_model, h = 10)  # Forecast for the next 10 months
+pred_values <- varma_forecast$pred
+# Assume we have actual values for comparison (replace with actual data)
+actual_values <- var_data_clean$Price_Diff[(nrow(var_data_clean)-9):nrow(var_data_clean)]
+# Compute error metrics
+rmse <- sqrt(mean((actual_values - pred_values)^2, na.rm = TRUE))  # RMSE
+mae <- mean(abs(actual_values - pred_values), na.rm = TRUE)  # MAE
+mape <- mean(abs((actual_values - pred_values) / actual_values) * 100, na.rm = TRUE)
+# Create a table with results
+accuracy_table <- data.frame(
+  Metric = c("RMSE", "MAE", "MAPE"),
+  Value = c(rmse, mae, mape)
+)
+kable(accuracy_table, caption = "VARMA Model Accuracy Metrics")
+```
+
+```{r, eval=FALSE}
+#| warning: false
+#| message: false
+
+price <- 
+  read_csv(here::here("~/Cocoa_price_forecast/
+                      data/cleaned_data/price_data.csv"))
+climate <- 
+  read_csv(here::here("~/Cocoa_price_forecast/
+                      data/cleaned_data/climate_data.csv"))
+cocoa <-
+  read_csv(here::here("~/Cocoa_price_forecast/
+                      data/cleaned_data/cocoa_data.csv"))
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=FALSE}
+# Ensure data is sorted by date
+cocoa <- cocoa %>% 
+  arrange(YearMonth)
+# Create lagged features (common in time series forecasting)
+cocoa <- cocoa %>%
+  mutate(
+    Price_diff = c(NA, diff(Price)),  # First difference
+    Price_diff_lag1 = lag(Price_diff, 1),
+    Price_diff_lag2 = lag(Price_diff, 2),
+    Price_diff_lag3 = lag(Price_diff, 3),
+    Exchange_Rate_lag1 = lag(Exchange_Rate, 1)
+  ) %>%
+  na.omit()  # Remove rows with NA created by lagging
+# Split into training and test sets (last 6 months for testing)
+train_idx <- 1:(nrow(cocoa) - 6)
+train_data <- cocoa[train_idx, ]
+test_data <- cocoa[-train_idx, ]
+# Prepare matrices for XGBoost
+features <- c("Monthly_Avg_Temp", "Monthly_Avg_Precip", "Production_in_Ton", 
+              "Exchange_Rate", "Exchange_Rate_lag1", "Price_diff", 
+              "Price_diff_lag1", "Price_diff_lag2", "Price_diff_lag3")
+dtrain <- xgb.DMatrix(
+  data = as.matrix(train_data[, features]),
+  label = train_data$Price
+)
+dtest <- xgb.DMatrix(
+  data = as.matrix(test_data[, features]),
+  label = test_data$Price
+)
+# Set parameters
+params <- list(
+  objective = "reg:squarederror",  
+  eta = 0.1,                      
+  max_depth = 6,                  
+  min_child_weight = 1,           
+  subsample = 0.8,              
+  colsample_bytree = 0.8         
+)
+# Train model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 500,                 
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 20,     
+  print_every_n = 10
+)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=FALSE}
+# Refit the model by dropping Price_diff, Price_diff_lag3, 
+# Monthly_Avg_Temp & Monthly_Avg_Precip
+
+# Create trimmed version
+cocoa_trimmed <- cocoa %>%
+  mutate(YearMonth = as.Date(paste0(YearMonth, "-01"))) %>% 
+  filter(YearMonth < as.Date("2025-03-01")) %>%
+  arrange(YearMonth)
+
+# Create differenced series and lags
+cocoa2 <- cocoa_trimmed %>%
+  mutate(
+    Price_diff = c(NA, diff(Price)),  # First difference
+    Price_diff_lag1 = lag(Price_diff, 1),
+    Price_diff_lag2 = lag(Price_diff, 2),
+    Exchange_Rate_lag1 = lag(Exchange_Rate, 1)
+  ) %>%
+  na.omit()
+# Define feature set for xbg_model2
+features2 <- c("Exchange_Rate", "Exchange_Rate_lag1", "Production_in_Ton",
+                   "Price_diff_lag1", "Price_diff_lag2")
+# Train-test split (last 6 months for testing)
+train_idx2 <- 1:(nrow(cocoa2) - 6)
+train_data2 <- cocoa2[train_idx2, ]
+test_data2 <- cocoa2[-train_idx2, ]
+# Create DMatrices for xbg_model2
+dtrain2 <- xgb.DMatrix(
+  data = as.matrix(train_data2[, features2]),
+  label = train_data2$Price_diff
+)
+dtest2 <- xgb.DMatrix(
+  data = as.matrix(test_data2[, features2]),
+  label = test_data2$Price_diff
+)
+# Model parameters
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 5,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+# Train xbg_model2 model
+set.seed(123)
+xbg_model2 <- xgb.train(
+  params = params,
+  data = dtrain2,
+  nrounds = 500,
+  watchlist = list(train = dtrain2, test = dtest2),
+  early_stopping_rounds = 20
+)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=FALSE}
+# Refit by dropping Exchange_Rate_lag1 & Production_in_Ton
+cocoa3 <- cocoa %>%
+  mutate(YearMonth = as.Date(paste0(YearMonth, "-01"))) %>% 
+  filter(YearMonth < as.Date("2024-12-01")) %>%
+  arrange(YearMonth) %>%
+  mutate(
+    Price_diff = c(NA, diff(Price)),
+    Price_diff_lag1 = lag(Price_diff, 1),
+    Price_diff_lag2 = lag(Price_diff, 2)
+  ) %>%
+  select(YearMonth, Price, Price_diff, Price_diff_lag1, Price_diff_lag2, 
+         Exchange_Rate) %>%
+  na.omit()
+# Define feature set
+features3 <- c("Price_diff_lag1", "Price_diff_lag2", "Exchange_Rate")
+# Split into training and test sets (last 6 months for testing)
+train_idx <- 1:(nrow(cocoa3) - 6)
+train_data3 <- cocoa3[train_idx, ]
+test_data3 <- cocoa3[-train_idx, ]
+# Create train/test matrices
+dtrain3 <- xgb.DMatrix(
+  data = as.matrix(train_data3[, features3]),
+  label = train_data3$Price_diff
+)
+dtest3 <- xgb.DMatrix(
+  data = as.matrix(test_data3[, features3]),
+  label = test_data3$Price_diff
+)
+# Set model parameters
+params3 <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 4,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+# Train model with test set validation
+set.seed(123)
+xgb_model3 <- xgb.train(
+  params = params3,
+  data = dtrain3,
+  nrounds = 500,
+  watchlist = list(train = dtrain3, test = dtest3),
+  print_every_n = 20
+)
+# Get last values for forecasting
+last_vals3 <- cocoa3 %>% 
+  filter(YearMonth == max(YearMonth)) %>%
+  select(Price, Price_diff, Price_diff_lag1, Price_diff_lag2, Exchange_Rate)
+# Forecast setup
+forecast_dates3 <- seq.Date(as.Date("2024-12-01"), by = "month", length.out = 6)
+forecast_data3 <- data.frame(
+  YearMonth = forecast_dates3,
+  Price_diff_pred3 = NA,
+  Price_pred3 = NA
+)
+# Initialize values
+current_price3 <- last_vals3$Price
+current_diff3 <- last_vals3$Price_diff
+prev_diff1_3 <- last_vals3$Price_diff_lag1
+prev_diff2_3 <- last_vals3$Price_diff_lag2
+current_exchange3 <- last_vals3$Exchange_Rate
+# Recursive forecasting
+for (i in 1:6) {
+  input_data3 <- data.frame(
+    Price_diff_lag1 = ifelse(i >= 2, 
+                             forecast_data3$Price_diff_pred3[i-1], 
+                             prev_diff1_3),
+    Price_diff_lag2 = ifelse(i >= 3, 
+                             forecast_data3$Price_diff_pred3[max(1,i-2)], 
+                             prev_diff2_3),
+    Exchange_Rate = current_exchange3
+  )
+  forecast_data3$Price_diff_pred3[i] <- predict(
+    xgb_model3,
+    newdata = xgb.DMatrix(data = as.matrix(input_data3))
+  )
+  current_price3 <- current_price3 + forecast_data3$Price_diff_pred3[i]
+  forecast_data3$Price_pred3[i] <- current_price3
+  prev_diff2_3 <- ifelse(i >= 2, forecast_data3$Price_diff_pred3[max(1,i-2)],
+                         prev_diff2_3)
+  prev_diff1_3 <- forecast_data3$Price_diff_pred3[i]
+}
+importance_matrix <- xgb.importance(feature_names = features,
+                                    model = xgb_model)
+importance_matrix$Color <- ifelse(importance_matrix$Gain >= 0.1,  
+                                  "#1f77b4", "gray50")
+importance_matrix2 <- xgb.importance(feature_names = features2,
+                                     model = xbg_model2)
+importance_matrix2$Color <- ifelse(importance_matrix2$Gain >= 0.1,  
+                                   "#1f77b4", "gray50")
+importance_matrix3 <- xgb.importance(feature_names = features3, 
+                                     model = xgb_model3)
+importance_matrix3$Color <- ifelse(importance_matrix3$Gain >= 0.1,  
+                                   "#1f77b4", "gray50")
+```
+
+```{r feature-importance-plot, fig.width=10, fig.height=4.5, message=FALSE, warning=FALSE, eval=FALSE}
+ggplot(importance_matrix, aes(x = reorder(Feature, Gain), y = Gain, 
+                              fill = Color)) +
+  geom_bar(stat = "identity", width = 0.7) + 
+  coord_flip() +
+  scale_fill_identity() +
+  labs(
+    title = "Feature Importance in Initial Model",
+    x = "Feature",
+    y = "Relative Importance (Gain)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 24) 
+  )
+
+ggplot(importance_matrix2, aes(x = reorder(Feature, Gain), y = Gain, 
+                               fill = Color)) +
+  geom_bar(stat = "identity", width = 0.7) + 
+  coord_flip() +
+  scale_fill_identity() +
+  labs(
+    title = "Feature Importance in Model 2",
+    x = "Feature",
+    y = "Relative Importance (Gain)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 24) 
+  )
+
+ggplot(importance_matrix3, aes(x = reorder(Feature, Gain), y = Gain, 
+                               fill = Color)) +
+  geom_bar(stat = "identity", width = 0.65) + 
+  coord_flip() +
+  scale_fill_identity() +
+  labs(
+    title = "Feature Importance in Model 3",
+    x = "Feature",
+    y = "Relative Importance (Gain)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 24) 
+  )
+```
+
+```{r, fig.width=12, fig.height=6, message=FALSE, warning=FALSE, eval=FALSE}
+
+train3 <- cocoa3 %>% filter(YearMonth < as.Date("2010-01-01"))
+test3 <- cocoa3 %>% filter(YearMonth >= as.Date("2010-01-01"))
+
+# Get predictions on test data using Model 3
+test_preds3 <- predict(
+  xgb_model3, 
+  newdata = xgb.DMatrix(data = as.matrix(test3[, features3]))
+)
+
+# Calculate metrics 
+metrics3 <- data.frame(
+  Metric = c("MAE", "RMSE", "MAPE(%)"),
+  Value = c(
+    mean(abs(test3$Price_diff - test_preds3)),
+    sqrt(mean((test3$Price_diff - test_preds3)^2)),
+    mean(abs((test3$Price_diff - test_preds3)/test3$Price_diff), 
+         na.rm = TRUE)*100
+  )
+)
+# Format the table
+kable(metrics3, 
+      align = c('l', 'r'),
+      col.names = c("Metric", "Value"),
+      caption = "Model 3 Metrics",
+      digits = 3)
+# Visual comparison
+ggplot(data.frame(
+  Date = test3$YearMonth,
+  Actual = test3$Price_diff,
+  Predicted = test_preds3
+), aes(x = Date)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), linewidth = 1, linetype = 
+              "dashed") +
+  scale_color_manual(values = c("Actual" = "#1f77b4", "Predicted" = "#ff7f0e"))
++
+  labs(
+    title = "Actual vs Predicted Price Differences",
+    subtitle = paste("Test Period: 2010-01-01 to", format(max(test3$YearMonth),
+                                                          "%Y-%m-%d")),
+    y = "Price Difference", x = "Date") +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 18) 
+  )
+# Visualization
+plot_data3 <- bind_rows(
+  cocoa3 %>%
+    select(YearMonth, Price) %>%
+    tail(12) %>%
+    mutate(Type = "Historical", YearMonth = as.Date(YearMonth)),
+  cocoa3 %>%
+    select(YearMonth, Price) %>%
+    tail(1) %>%
+    mutate(Type = "Forecast", YearMonth = as.Date(YearMonth)),
+  forecast_data3 %>%
+    mutate(Type = "Forecast", YearMonth = as.Date(YearMonth)) %>%
+    select(YearMonth, Price = Price_pred3, Type)
+)
+ggplot(plot_data3, aes(x = YearMonth, y = Price, color = Type, group = 1)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Historical" = "#1f77b4", 
+                                "Forecast" = "#ff7f0e")) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(
+    title = "Six-month Cocoa Price Forecast (From Dec 2024 to May 2025)",
+    y = "Price (USD)",
+    x = "Date") + theme_minimal(base_size = 12) +
+  theme( plot.title = element_text(size = 20) )
+```
